@@ -1,0 +1,307 @@
+---
+title: "Quantile random forest for abundance-suitability modeling"
+date: "`r Sys.Date()`"
+author: "Sarah Goslee"
+output:
+  rmarkdown::pdf_document:
+geometry: margin=1in
+---
+
+# Introduction
+
+This code accompanies the manuscript:
+
+What Could Be: Quantile Random Forest Models of the Abundance-Suitability Relationship
+Sarah C. Goslee1, Martina Calovi2, Melanie Kammerer1, Darin J. McNeil3, and Douglas A. Miller4
+
+1. USDA-ARS Pasture Systems and Watershed Management Research Unit, University Park, PA 16802, USA
+2. Department of Geography, Norwegian University of Science and Technology, Trondheim, Norway
+3. Department of Environmental Sciences, University of North Carolina Wilmington, Wilmington, NC 28403, USA
+4. Department of Ecosystem Science and Management, The Pennsylvania State University, University Park, PA 16802, USA
+
+The data will be provided after we identify a reliable system for storing large files.
+
+
+```{r libraries}
+
+	library(sp)
+	library(raster)
+	library(gstat)
+
+	library(ranger)
+
+	library(ecodist)
+
+```
+
+
+# Climate data
+
+The 20 climate predictors were previously calculated from the PRISM 4-km gridded daily data PRISM Climate Group 2020](https://prism.oregonstate.edu). Thirty-year means (1981-2010) were used for selected BIOCLIM indices, widely used in species distribution modeling, augmented with some plant-relevant metrics from the USDA National Range and Pasture Handbook.
+
+
+```{r climatedata}
+
+	mq <- readRDS("data/PRISMD2.198130.et.RDS"))
+	load("data/PRISMgridLL.RDA")
+
+```
+
+
+# FIA data
+
+There are two papers by Dallas and others that look at species distribution and abundance models using tree seedling distributions. The same dataset they used is excellent for illustrating features of abundance-suitability modeling, for all the reasons they describe.
+
+The paper by Dallas and Hastings (2018) used FIA tree seedling data to model presence and abundance for trees and for mammals, using boosted regression tree models. The Dallas et al. 2017 paper also used FIA tree seedling data, and provides the data directly; it is clear from the code that the 2018 paper used this exact file, which is available from [their figshare archive](https://figshare.com/articles/dataset/Data_and_code_to_reproduce_Dallas_Decker_Hastings_Species_are_not_most_abundant_in_the_center_of_their_geographic_range_or_climatic_niche_/5023232). This file must be downloaded and moved to the current workspace before running this code.
+
+- Dallas, T. A., & Hastings, A. (2018). Habitat suitability estimated by niche models is largely unrelated to species abundance. Global Ecology and Biogeography, 27(12), 1448-1456. doi:10.1111/geb.12820
+
+- Dallas, T., Decker, R. R., & Hastings, A. (2017). Species are not most abundant in the centre of their geographic range or climatic niche. Ecology Letters, 20(12), 1526-1533. doi:10.1111/ele.12860 
+
+
+```{r treedata}
+
+    if(!exists("Trees/fiaRangeShape.RData")) {
+        # this should work, but does not reliably complete the download
+        # download.file("https://figshare.com/ndownloader/files/9533989", destfile = figshare.zip")
+        if(exists("figshare.zip")) {
+            unzip("figshare.zip", files = "Trees/fiaRangeShape.RData")
+        } else {
+            stop(paste("Please download the figshare file and move it to", getwd()))
+        }
+    }
+
+	load("Trees/fiaRangeShape.RData")
+
+	fia <- data.frame(fia2[, c("longitude", "latitude", "invyr", "species")], scaledAbundance = fia2$tpa_unadj)
+    fia$scaledAbundance <- ifelse(is.na(fia$scaledAbundance), 0, fia$scaledAbundance)
+	rm(fia2)
+
+
+```
+
+## Aggregation
+
+Tree seedling abundance was aggregated to the 4-km PRISM grid cells, using both mean and maximum values per cell. 
+
+Because several species had a few unusually high outliers, values over the 99th percentile were set to the 99th percentile value. 
+
+
+```{r aggregation}
+
+	# add PRISM grid id to data
+
+    thispts <- fia[, c("longitude", "latitude")]
+    thispts <- SpatialPointsDataFrame(thispts, data = data.frame(rowid = seq_len(nrow(fia))), proj4string=CRS(proj4string(PRISMgrid)))
+
+    fia.prismid <- cellFromXY(raster(PRISMgrid), thispts)
+
+    fia <- data.frame(prismid = fia.prismid, fia)
+	fia <- subset(fia, prismid %in% mq$prismid)
+
+	rm(thispts, fia.prismid)
+
+
+    # trim very high valuess
+    
+	fia99 <- fia
+	for(thissp in sort(unique(fia99$species))) {
+
+		q99 <- quantile(fia99$scaledAbundance[fia99$species == thissp], .99, na.rm = TRUE)
+		fia99$scaledAbundance[!is.na(fia99$scaledAbundance) & fia99$species == thissp & fia99$scaledAbundance > q99] <- q99
+	
+	}
+	rm(q99)
+
+	# by prism
+	fia99.prism <- ecodist::crosstab(rowlab = fia99$prismid, collab = fia99$species, values = fia99$scaledAbundance, type = "mean", na.rm = TRUE)
+	fia99.prism <- fia99.prism[, colnames(fia99.prism) %in% colnames(fia.prism)]
+
+	# by prism max
+	fia99.prismmax <- ecodist::crosstab(rowlab = fia99$prismid, collab = fia99$species, values = fia99$scaledAbundance, type = "max", na.rm = TRUE)
+
+```
+
+
+## Species
+
+Goal: pick species of different locations and extents and densities, as well as different families. After examining the distribution and abundance of each, fifteen genera were selected for further analysis, for a total of 130 species.
+
+ - Acer
+ - Abies
+ - Betula
+ - Carya
+ - Diospyros
+ - Fraxinus
+ - Larix
+ - Magnolia
+ - Picea
+ - Pinus
+ - Populus
+ - Prosopis
+ - Prunus
+ - Quercus
+ - Tsuga
+
+
+# Quantile random forest
+
+Preliminary model tuning was used to select parameters for the random forest models. For each species, regular and quantile random forest models were fitted.
+
+
+```{r rfmodel}
+
+	genus <- c("Acer", "Abies", "Betula", "Carya", "Diospyros", "Fraxinus", "Larix", "Magnolia", "Picea", "Pinus", "Populus", "Prosopis", "Prunus", "Quercus", "Tsuga")
+
+	sppuse <- (sub("\\..*$", "", colnames(fia99.prism)) %in% genus) & !(grepl("spp", colnames(fia99.prism))) & (colSums(fia99.prism > 0) > 100)
+
+	fia99.prismuse <- fia99.prism[, sppuse]
+	fia99.prismmaxuse <- fia99.prismmax[, sppuse]
+
+
+    for(i in seq_len(ncol(fia99.prismuse))) {
+
+        cat(i, "\n")
+
+        thissp <- colnames(fia99.prismuse)[i]
+
+        datp <- data.frame(y = fia99.prismuse[[thissp]], env.prism[, !(colnames(env.prism) %in% c("prismid", "rowid", "longitude", "latitude"))])
+        datp.rf <- ranger(y ~ ., data = datp, importance = 'impurity', num.trees = 5000, min.node.size = 50)
+        datp.rfq <- ranger(y ~ ., data = datp, importance = 'impurity', num.trees = 5000, min.node.size = 50, quantreg = TRUE)
+
+        datpm <- data.frame(y = fia99.prismmaxuse[[thissp]], env.prism[, !(colnames(env.prism) %in% c("prismid", "rowid", "longitude", "latitude"))])
+        datpm.rf <- ranger(y ~ ., data = datpm, importance = 'impurity', num.trees = 5000, min.node.size = 50)
+        datpm.rfq <- ranger(y ~ ., data = datpm, importance = 'impurity', num.trees = 5000, min.node.size = 50, quantreg = TRUE)
+
+        save(datp.rf, datp.rfq, datpm.rf, datpm.rfq, file = paste("rfmodels", thissp, "RDA", sep="."))
+
+    }
+
+
+```
+
+## Model prediction
+
+
+Predictions for the sampled FIA locations and for the full contiguous US were made using mean RF, and at a range of quantiles.
+
+
+```{r predictions}
+
+filelist <- list.files(pattern = "rfmodels")
+
+for(thisfile in filelist) {
+
+	load(thisfile)
+
+	#####
+
+	# env: at FIA locations for comparison to measured values
+
+	datp.envpred   <- predict(datp.rf,  env.prism)
+	datp.envpredq  <- predict(datp.rfq, env.prism, type = "quantiles", quantiles = c(.05, .1, .25, .5, .75, .9, .95))
+
+	datpm.envpred   <- predict(datpm.rf,  env.prism)
+	datpm.envpredq  <- predict(datpm.rfq, env.prism, type = "quantiles", quantiles = c(.05, .1, .25, .5, .75, .9, .95))
+
+	save(datp.envpred, datp.envpredq, datpm.envpred, datpm.envpredq, file = sub("rfmodels", "envpred", thisfile))
+	rm(datp.envpred, datp.envpredq, datpm.envpred, datpm.envpredq)
+
+	###
+
+	# mq: full CONUS for mapping
+
+	datp.pred   <- predict(datp.rf,  mq)$predictions
+	datp.predq  <- predict(datp.rfq, mq, type = "quantiles", quantiles = c(.05, .1, .25, .5, .75, .9, .95))$predictions
+
+	datpm.pred   <- predict(datpm.rf,  mq)$predictions
+	datpm.predq  <- predict(datpm.rfq, mq, type = "quantiles", quantiles = c(.05, .1, .25, .5, .75, .9, .95))$predictions
+
+	save(datp.pred, datp.predq, datpm.pred, datpm.predq, file = sub("rfmodels", "mqpred", thisfile))
+	rm(datp.pred, datp.predq, datpm.pred, datpm.predq)
+}
+
+```
+
+
+
+## Mapping
+
+There are two possibilities, mapping in environmental space and mapping in geographic space. 
+
+```{r spatial}
+
+
+for(thissp in splist) {
+
+    load(file.path(results.path, "rfmodels", paste("rfmodels", thissp, "RDA", sep = ".")))
+    load(file.path(results.path, "envpred", paste("envpred", thissp, "RDA", sep = ".")))
+    load(file.path(results.path, "mqpred", paste("mqpred", thissp, "RDA", sep = ".")))
+
+###
+
+    pq <- data.frame(datp.pred, datp.predq)
+    colnames(pq) <- c("mean", "q05", "q10", "q25", "q50", "q75", "q90", "q95") 
+
+    pca.pts <- SpatialPointsDataFrame(mq.pca.pts, data = pq)
+
+    r.pca <- rasterize(pca.pts, r, fun = "count")
+    r.pca <- raster(r.pca, 1)
+
+
+    # map in multivariate climate space
+
+    gs <- gstat(formula = mean ~ 1, locations=pca.pts)
+    idwmean <- interpolate(r, gs)
+    idwmean[is.na(r.pca)] <- NA
+
+    gs <- gstat(formula = q05 ~ 1, locations=pca.pts)
+    idw05 <- interpolate(r, gs)
+    idw05[is.na(r.pca)] <- NA
+
+    gs <- gstat(formula = q10 ~ 1, locations=pca.pts)
+    idw10 <- interpolate(r, gs)
+    idw10[is.na(r.pca)] <- NA
+
+    gs <- gstat(formula = q25 ~ 1, locations=pca.pts)
+    idw25 <- interpolate(r, gs)
+    idw25[is.na(r.pca)] <- NA
+
+    gs <- gstat(formula = q50 ~ 1, locations=pca.pts)
+    idw50 <- interpolate(r, gs)
+    idw50[is.na(r.pca)] <- NA
+
+    gs <- gstat(formula = q75 ~ 1, locations=pca.pts)
+    idw75 <- interpolate(r, gs)
+    idw75[is.na(r.pca)] <- NA
+
+    gs <- gstat(formula = q90 ~ 1, locations=pca.pts)
+    idw90 <- interpolate(r, gs)
+    idw90[is.na(r.pca)] <- NA
+
+    gs <- gstat(formula = q95 ~ 1, locations=pca.pts)
+    idw95 <- interpolate(r, gs)
+    idw95[is.na(r.pca)] <- NA
+
+    rm(gs)
+
+
+    # map in geographic space
+
+	pq.map <- PRISMgrid
+	temp <- PRISMgrid@data
+	temp <- merge(temp, data.frame(id = mq$prismid, pq), all.x=TRUE)
+	temp <- temp[order(temp$id), ]
+	pq.map@data <- temp
+    rm(temp)
+
+
+    save(pq, "idw05", "idw10", "idw25", "idw50", "idw75", "idw90", "idw95", "idwmean", pq.map, file = file.path(results.path, paste("spatial", thissp, "RDA", sep=".")))
+    rm(pq, "idw05", "idw10", "idw25", "idw50", "idw75", "idw90", "idw95", "idwmean", pq.map)
+
+}
+
+```
+
+
+

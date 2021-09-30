@@ -1,0 +1,489 @@
+---
+title: "Figures for quantile niche manuscript"
+date: "`r Sys.Date()`"
+author: "Sarah Goslee"
+output:
+  rmarkdown::pdf_document:
+geometry: margin=1in
+---
+
+
+# Manuscript figures
+
+This file produces the figures for the manuscript:
+
+What Could Be: Quantile Random Forest Models of the Abundance-Suitability Relationship
+Sarah C. Goslee1, Martina Calovi2, Melanie Kammerer1, Darin J. McNeil3, and Douglas A. Miller4
+1. USDA-ARS Pasture Systems and Watershed Management Research Unit, University Park, PA 16802, USA
+2. Department of Geography, Norwegian University of Science and Technology, Trondheim, Norway
+3. Department of Environmental Sciences, University of North Carolina Wilmington, Wilmington, NC 28403, USA
+4. Department of Ecosystem Science and Management, The Pennsylvania State University, University Park, PA 16802, USA
+
+
+```{r setup}
+
+    library(sp)
+    library(raster)
+
+    load("data/statesLL.RDA")
+    load("data/PRISMgridLL.RDA")
+
+    example.species <- c("Acer.rubrum", "Picea.rubens")
+    example.colors  <- c("#1f78b4", "#33a02c")
+
+    resolution <- 300
+
+
+```
+
+
+# Figure 1.
+
+Species potential abundance distribution along an environmental gradient is not necessarily symmetrical, or even continuous. Observed abundances at any point on the gradient fall along a distribution from 0 to the potential abundance. If an observed abundance is greater than the expected potential abundance, it may be a sink site, or the species may be supported by unmodeled factors (for instance management).
+
+```{r fig1}
+
+
+    tiff("fig1.tif", width=4*resolution, height=3*resolution, pointsize=resolution/8, compression="lzw")
+
+    par(mai = par()$mai * c(1, 1, .3, 1))
+
+    #####
+
+    # generate artificial abundance-suitability curve
+    set.seed(1111)
+    maxabun.generate <- hist(rbeta(30000,2,5), breaks=100, plot = FALSE)
+
+    maxabun <- data.frame(
+        x = c(0, 2, 2 + (maxabun.generate$breaks * 6)[-1], 7.76, 10),
+        y = c(0, 0, smooth.spline(70 * maxabun.generate$counts / max(maxabun.generate$counts))$y, 0, 0))
+
+    # generate 100 random points under the curve
+    sample.points <- t(sapply(seq_len(100), function(i) {
+        thisrow <- sample(seq_len(nrow(maxabun))[maxabun$y > 0.2], 1)
+        c(maxabun$x[thisrow], maxabun$y[thisrow] * runif(1))
+    }))
+    sample.points <- data.frame(sample.points)
+    colnames(sample.points) <- c("x", "y")
+
+#####
+
+    plot(c(0, 10), c(0, 100), xlab = "Environmental gradient", ylab = "Species abundance", main = "", type = "n")
+    lines(maxabun$x, maxabun$y, lwd = 3, col = "#d95f02")
+
+    points(sample.points)
+
+    # add 2 sink points above the curve
+
+    points(3.2, 80, pch = 8)
+    text(3.2, 80+3, pos = 3, "Greater than\nexpected abundance")
+
+    points(1, 15, pch = 8)
+    text(1, 15+3, pos = 3, "Outside of\nexpected\nenvironment")
+
+    # illustrate sampling data vs suitability
+
+    slice.min <- 4.46
+    slice.max <- 4.76
+
+    segments(slice.min, 0, slice.min, maxabun$y[maxabun$x == slice.min])
+    segments(slice.max, 0, slice.max, maxabun$y[maxabun$x == slice.max])
+
+    sample.points.sub <- subset(sample.points, x >= slice.min & x <= slice.max)
+    points(sample.points.sub, pch = 16)
+
+    arrows(mean(slice.min, slice.max) + .3, with(maxabun, mean(y[x >= slice.min & x <= slice.max])), 6, with(maxabun, mean(y[x >= slice.min & x <= slice.max])), lwd = 2, col = "#d95f02", code = 1)
+    text(5.8, with(maxabun, mean(y[x >= slice.min & x <= slice.max])) + 3, pos = 4, "Potential abundance", col = "#d95f02")
+
+    arrows(7.6, min(sample.points.sub$y), 7.6, max(sample.points.sub$y), code = 3)
+    text(7.6, 20, pos = 4, "Observed\nabundances")
+
+    dev.off()
+
+```
+
+
+
+# Figure 2
+
+Panels a and c show the observed presence distribution of seedlings of two tree species, one with a very broad and one with a narrower range, superimposed on gray shading of the FIA sampling extent. Panels b and d show the corresponding 95% quantile predictions; darker shades denote greater suitability.  
+
+
+```{r fig2}
+
+## distribution maps
+
+plot.distr <- function(thissp, thiscol = "black", label) {
+
+	plot(states)
+	points(crd[, 1:2], col="gray85", pch = ".")
+	points(fia$longitude[grepl(thissp, fia$species) & fia$scaledAbundance > 0], fia$latitude[grepl(thissp, fia$species) & fia$scaledAbundance > 0], pch = ".", col=thiscol)
+	plot(states, add = TRUE)
+    spname <- sub("\\.", " ", thissp)
+
+    if(missing(label)) {
+	    title(bquote(italic(.(spname)) ~ "distribution"), col.main = thiscol)
+    } else {
+	    title(bquote(.(label) ~ italic(.(spname)) ~ "distribution"), col.main = thiscol)
+    }
+
+	invisible()
+
+}
+
+## prediction maps in geographic space
+
+plot.map <- function(thissp, thiscol = "black", type = "mean", label) {
+
+	load(file.path("models", "spatial", paste("spatial", thissp, "RDA", sep=".")))
+	pq.map@data[pq.map@data < 1] <- NA
+
+	if(type == "mean") {
+	    image(pq.map, "mean", col = rev(scico::scico(30, palette = "oslo")), main = "", zlim=c(0, max(c(pq.map$mean, pq.map$q95), na.rm = TRUE)), xlim = range(crd$longitude), ylim = range(crd$latitude))
+		plot(states, add=TRUE)
+        spname <- sub("\\.", " ", thissp)
+
+        if(missing(label)) {
+    	    title(bquote(italic(.(spname)) ~ "mean"), col.main = thiscol)
+        } else {
+    	    title(bquote(.(label) ~ italic(.(spname)) ~ "mean"), col.main = thiscol)
+        }
+	
+    }
+	if(type == "q95") {
+	    image(pq.map, "q95", col = rev(scico::scico(30, palette = "davos")), main = "", zlim=c(0, max(c(pq.map$mean, pq.map$q95), na.rm = TRUE)), xlim = range(crd$longitude), ylim = range(crd$latitude))
+		plot(states, add=TRUE)
+        spname <- sub("\\.", " ", thissp)
+
+        if(missing(label)) {
+    	    title(bquote(italic(.(spname)) ~ "95%"), col.main = thiscol)
+        } else {
+    	    title(bquote(.(label) ~ italic(.(spname)) ~ "95%"), col.main = thiscol)
+        }
+	
+    }
+
+	invisible()
+
+}
+
+######
+
+    tiff("fig2.tif", width=5*resolution, height=4*resolution, pointsize=resolution/8, compression="lzw")
+
+    par(mfcol = c(2, 2))
+
+    # distribution panels
+
+    thislab <- c("a.", "c.")
+
+    par(mai = c(0, 0, par()$mai[3], 0))
+
+        for(i in 1:2) {
+            thissp  <- example.species[i]
+            thiscol <- example.colors[i]
+            plot.distr(thissp, thiscol, label = thislab[i])
+        }
+
+    # quantile model panels
+
+    thislab <- c("b.", "d.")
+
+        for(i in 1:2) {
+            thissp  <- example.species[i]
+            thiscol <- example.colors[i]
+            plot.map(thissp, thiscol, "q95", label = thislab[i])
+        }
+
+    dev.off()
+
+
+```
+
+
+# Figure 3
+
+
+
+
+```{r fig3}
+
+
+plot.pred <- function(thissp, thiscol = "black", legend = TRUE, label) {
+
+	load(file.path("models", "envpred", paste("envpred", thissp, "RDA", sep=".")))
+
+    plot(fia99.prism[[thissp]], datp.envpredq$predictions[, 7], col="#d95f02", pch = 2, xlab = "Measured abundance", ylab = "Modeled abundance", xlim = c(0, max(datp.envpredq$predictions[, 7])), ylim = c(0, max(datp.envpredq$predictions[, 7])))
+    points(fia99.prism[[thissp]], datp.envpred$predictions, col="#7570b3", pch = 1)
+	abline(c(0, 1), lwd = 9)
+
+    spname <- sub("\\.", " ", thissp)
+
+    if(missing(label)) {
+	    title(bquote(italic(.(spname))), col.main = thiscol)
+    } else {
+    	title(bquote(.(label) ~ italic(.(spname))), col.main = thiscol)
+    }
+	
+	if(legend) legend("topleft", legend = c("RF", "qRF, 95%"), pch = c(1, 2), col = c("#7570b3", "#d95f02"), cex=.9)
+
+	invisible()
+
+}
+
+
+###
+
+tiff("fig3.tif", width=2.5*resolution, height=5.5*resolution, pointsize=resolution/7, compression="lzw")
+
+### predictions
+
+par(mfcol=c(2, 1))
+par(mai = par()$mai * c(1, 1, .9, 1))
+
+thislab <- c("a.", "b.")
+
+	for(i in 1:2) {
+		thissp  <- example.species[i]
+		thiscol <- example.colors[i]
+		plot.pred(thissp, thiscol, legend = c(FALSE, TRUE)[i], label = thislab[i])
+	}
+
+dev.off()
+
+
+```
+
+
+# Figure 4
+
+
+```{r fig4}
+
+
+# smoothed line plots for environmental gradient
+
+qline <- function(x, y, n = 50) {
+	breaks <- seq(min(x), max(x), length.out = n)
+	groups <- cut(x, breaks = breaks)
+	sx <- sy <- rep(NA, length(levels(groups)))
+	for(i in seq_along(levels(groups))) {
+		sx[i] <- mean(breaks[c(i, i+1)])
+		tempy <- y[groups == levels(groups)[i]]
+		tempy <- tempy[!is.na(tempy) & tempy > 0]
+		sy[i] <- quantile(tempy, .99)
+	}
+	sy[is.na(sy)] <- 0
+	list(x = sx, y = sy, sy = smooth(sy))
+}
+
+
+# full set of quantile lines
+
+plot.qlines <- function(thissp, thiscol = "black", legend = TRUE, label) {
+
+	load(file.path("models", "envpred", paste("envpred", thissp, "RDA", sep=".")))
+	load(file.path("models", "mqpred", paste("mqpred", thissp, "RDA", sep=".")))
+
+
+    # aggregated fia samples
+	spdat <- data.frame(datp.envpred$predictions, datp.envpredq$predictions, datp.envpredqs$predictions)
+	colnames(spdat) <- c("mean", "q05", "q10", "q25", "q50", "q75", "q90", "q95", "s05", "s10", "s25", "s50", "s75", "s90", "s95")
+	spdat[spdat < 0] <- 0
+	spdat <- data.frame(prismid = env.prism$prismid, y = fia99.prism[[thissp]], spdat)
+    spdat <- data.frame(rowid = seq_len(nrow(spdat)), spdat)
+    spdat <- merge(spdat, env.gradient, all.x = TRUE)
+    spdat <- spdat[order(spdat$rowid), ]
+	spdat <- spdat[spdat$y > 0, ]
+
+
+	mqdat <- data.frame(datp.pred, datp.predq, datp.predqs)
+	colnames(mqdat) <- c("mean", "q05", "q10", "q25", "q50", "q75", "q90", "q95", "s05", "s10", "s25", "s50", "s75", "s90", "s95")
+	mqdat[mqdat < 0] <- 0
+	mqdat <- data.frame(mqdat, env.gradient)
+
+	#
+
+	plot(mqdat$Comp.1, mqdat$q95, type = "n", xlab = "Environmental gradient: PCA 1", ylab = "Abundance")
+    spname <- sub("\\.", " ", thissp)
+
+    if(missing(label)) {
+	    title(bquote(italic(.(spname))), col.main = thiscol)
+    } else {
+    	title(bquote(.(label) ~ italic(.(spname))), col.main = thiscol)
+    }
+
+	thisline <- qline(x = mqdat$Comp.1, y = mqdat$q05, n = 40)
+	with(thisline, lines(x, sy, col = "gray70", lwd = 5))
+
+	thisline <- qline(x = mqdat$Comp.1, y = mqdat$q10, n = 40)
+	with(thisline, lines(x, sy, col = "gray60", lwd = 5))
+
+	thisline <- qline(x = mqdat$Comp.1, y = mqdat$q25, n = 40)
+	with(thisline, lines(x, sy, col = "gray50", lwd = 5))
+
+	thisline <- qline(x = mqdat$Comp.1, y = mqdat$q50, n = 40)
+	with(thisline, lines(x, sy, col = "gray40", lwd = 5))
+
+	thisline <- qline(x = mqdat$Comp.1, y = mqdat$q75, n = 40)
+	with(thisline, lines(x, sy, col = "gray30", lwd = 5))
+
+	thisline <- qline(x = mqdat$Comp.1, y = mqdat$q90, n = 40)
+	with(thisline, lines(x, sy, col = "gray20", lwd = 5))
+
+	thisline <- qline(x = mqdat$Comp.1, y = mqdat$q95, n = 40)
+	with(thisline, lines(x, sy, col = "gray10", lwd = 5))
+
+	thisline <- qline(x = mqdat$Comp.1, y = mqdat$mean, n = 40)
+	with(thisline, lines(x, sy, col = "#7570b3", lwd = 13))
+
+	if(legend) legend("topright", col=rev(c("gray70", "gray60", "gray50", "gray40", "gray30", "gray20", "gray10", "#7570b3")), lty=1, legend = rev(c("5%", "10%", "25%", "50%", "75%", "90%", "95%", "mean")), cex=.95, lwd=rev(c(rep(5, 7), 9)))
+
+	invisible()
+
+}
+
+
+####
+
+tiff("fig4.tif", width=2.5*resolution, height=5.5*resolution, pointsize=resolution/8, compression="lzw")
+
+### quantile lines
+
+par(mfcol=c(2, 1))
+par(mai = par()$mai * c(1, 1, .9, 1))
+thislab <- c("a.", "b.")
+
+	for(i in 1:2) {
+		thissp  <- example.species[i]
+		thiscol <- example.colors[i]
+		plot.qlines(thissp, thiscol, legend = c(FALSE, TRUE)[i], label = thislab[i])
+	}
+
+dev.off()
+
+
+
+```
+
+
+# Figure 5
+
+
+
+```{r fig5}
+
+
+trimmedabline <-  function(thislm, ...)  {
+
+	ends <- predict(thislm, newdata = data.frame(x  =  c(0, 10000)))
+	segments(0, ends[1], 10000, ends[2], ...)
+
+	invisible()
+
+}
+
+####
+
+tiff("fig5.tif", width=4*resolution, height=4*resolution, pointsize=resolution/7, compression="lzw")
+par(mai = par()$mai * c(1, 1, .3, 1))
+
+plot(c(0, 7000), c(0, 7000), type="n", xlab="Measured abundance",  ylab="Modeled abundance", main = "")
+legend("topleft", legend = c("RF", "95% quantile RF"), col=c("#7570b3", "#d95f02"), lty = c(1, 3), lwd=12)
+
+for(i in seq_along(splist)) {
+	
+	thissp <- splist[i]
+
+	plotdat <- data.frame(
+		x    = fia99.prism[[thissp]], 
+		y    = all.pred[[thissp]],
+		y95  = all.pred95[[thissp]])
+
+	trimmedabline(lm(y    ~ x, data = plotdat), col = "#7570b3", lty = 1, lwd = 3)
+	trimmedabline(lm(y95  ~ x, data = plotdat), col = "#d95f02", lty = 3, lwd = 3)
+
+}
+abline(c(0, 1), lwd = 9)
+
+dev.off()
+
+
+```
+
+# Supplementary figure 1
+
+
+Aggregation on maximum instead of mean.
+
+
+```{r suppl1}
+
+
+
+### Figure: quantile on mean vs quantile on max RF prediction lines
+
+tiff("figS1.tif", width=6*resolution, height=6*resolution, pointsize=.025*6*resolution)
+
+plot(c(0, 7000), c(0, 7000), type="n", xlab="Measured abundance",  ylab="Modeled abundance", main = "")
+legend("bottomright", legend = c("95% quantile, data aggregated by mean", "95% quantile, data aggregated by max"), col=c("#d95f02", "darkgray"), lty = c(1, 3), lwd = 12)
+
+for(i in seq_along(splist)) {
+	
+	thissp <- splist[i]
+
+	plotdat <- data.frame(
+		x    = fia99.prism[[thissp]], 
+		y    = all.pred[[thissp]],
+		y95  = all.pred95[[thissp]],
+		ym   = all.predm[[thissp]],
+		ym95 = all.predm95[[thissp]])
+
+
+	trimmedabline(lm(y95  ~ x, data = plotdat), col = "#d95f02", lty = 1, lwd = 3)
+	trimmedabline(lm(ym95 ~ x, data = plotdat), col = "darkgray", lty = 3, lwd = 3)
+
+}
+abline(c(0, 1), lwd = 9)
+
+dev.off()
+
+```
+
+
+# Figure S2
+
+Smoothed quantiles
+
+
+```{r figS2}
+
+
+thissp <- "Acer.rubrum"
+thisfiles <- load(paste("models/envpred/envpred", thissp, "RDA", sep="."))
+datp.envpredqs$predictions[datp.envpredqs$predictions < 0] <- 0
+
+tiff("figS2.tif", width=7*resolution, height=7*resolution, pointsize=resolution/6)
+
+### quantile lines
+
+par(mfcol=c(2, 2))
+
+plot(fia99.prism[[thissp]], datp.envpredq$predictions[, 2], col = "#d95f02", cex=.5, xlab = "Measured abundance", ylab = "10% quantile RF", main = paste(thissp, "quantile RF"))
+plot(fia99.prism[[thissp]], datp.envpredqs$predictions[, 2], col = "#d95f02", cex=.5, xlab = "Measured abundance", ylab = "10% quantile RF", main = paste(thissp, "smoothed quantile RF"))
+
+
+plot(fia99.prism[[thissp]], datp.envpredq$predictions[, 7], col = "#d95f02", cex=.5, xlab = "Measured abundance", ylab = "95% quantile RF", main = paste(thissp, "quantile RF"))
+plot(fia99.prism[[thissp]], datp.envpredqs$predictions[, 7], col = "#d95f02", cex=.5, xlab = "Measured abundance", ylab = "95% quantile RF", main = paste(thissp, "smoothed quantile RF"))
+
+dev.off()
+
+
+rm(list = thisfiles)
+rm(thisfiles, thissp)
+
+
+```
+
+
+
